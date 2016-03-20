@@ -23,7 +23,9 @@
             [buddy.auth.backends.session :as buddy-session]
             [buddy.auth.accessrules :as buddy-accessrules]
             [buddy.auth.middleware :as buddy-middleware]
-            [cheshire.core :as json]))
+            [cheshire.core :as json]
+            [slingshot.slingshot :as slingshot]
+            [clojure.tools.logging :as log]))
 
 (defn login
   "The authentication function is expected to return a map with a
@@ -108,6 +110,25 @@
   (-> (ring-response/response "Access denied")
       (ring-response/status suggested-code)))
 
+(defn- get-exception-error-response [error call-type]
+  (-> (if (= call-type :api)
+        (ring-response/response {:error error})
+        (ring-response/response error))
+      (ring-response/status 500)))
+
+(defn- wrap-exception-handler [handler log-exceptions call-type]
+  (fn [request]
+    (slingshot/try+
+      (handler request)
+      (catch (and (map? %) (contains? % :public)) {:keys [public]}
+        (if log-exceptions (log/info "Comrade exception:" (:message &throw-context)))
+        (get-exception-error-response public call-type))
+      (catch Object _
+        (when log-exceptions
+          (log/error "Exception:" (:message &throw-context))
+          (log/info "Stack trace:" (apply str (interpose "\n" (get-in &throw-context [:stack-trace])))))
+        (get-exception-error-response "Unknown error" call-type)))))
+
 (defn define-app
   "Define a web app, with the passed in parameters. Parameters are:
     :api-routes - compojure REST API routes.
@@ -130,22 +151,42 @@
     :api-defaults - custom settings to pass to ring.middleware.defaults/wrap-defaults.
       Defaults to ring.middleware.defaults/api-defaults (optional).
     :site-defaults - custom settings to pass to ring.middleware.defaults/wrap-defaults.
-      Defaults to ring.middleware.defaults/site-defaults (optional)."
+      Defaults to ring.middleware.defaults/site-defaults (optional).
+    :wrap-api-exceptions - if set exceptions are caught (API) (optional, default is true).
+    :wrap-site-exceptions - if set exceptions are caught (Site) (optional, default is true).
+    :log-exceptions - if set exceptions are logged (optional, default is true).
+    :api-custom-middlewares - custom middlewares to wrap around the request (API) (optional).
+    :site-custom-middlewares - custom middlewares to wrap around the request (Site) (optional)."
   [& {:keys [api-routes site-routes api-access-denied-fn site-access-denied-fn
-             allow-access-fn? api-defaults site-defaults]
+             allow-access-fn? api-defaults site-defaults
+             wrap-api-exceptions wrap-site-exceptions log-exceptions
+             api-custom-middleware site-custom-middleware]
       :or {api-access-denied-fn api-access-denied
            site-access-denied-fn site-access-denied
            allow-access-fn? (fn [request] true)
            api-defaults ring-defaults/api-defaults
-           site-defaults ring-defaults/site-defaults}
+           site-defaults ring-defaults/site-defaults
+           wrap-api-exceptions true
+           wrap-site-exceptions true
+           log-exceptions true
+           api-custom-middleware nil
+           site-custom-middleware nil}
       {:keys [admin-api user-api admin-site user-site]} :restrictions
       {:keys [session-key cookie-name max-age]} :session}]
   (let
     [api (-> (core/context "/api" request api-routes)
              (ring-json/wrap-json-body {:keywords? true})
              (ring-json/wrap-json-response)
-             (ring-defaults/wrap-defaults api-defaults))
-     site (ring-defaults/wrap-defaults site-routes site-defaults)]
+             (ring-defaults/wrap-defaults api-defaults)
+             (as-> handler (if wrap-api-exceptions
+                             (wrap-exception-handler handler log-exceptions :api)
+                             handler))
+             (as-> handler (if api-custom-middleware (api-custom-middleware handler) handler)))
+     site (-> (ring-defaults/wrap-defaults site-routes site-defaults)
+              (as-> handler (if wrap-site-exceptions
+                              (wrap-exception-handler handler log-exceptions :site)
+                              handler))
+              (as-> handler (if site-custom-middleware (site-custom-middleware handler) handler)))]
     (-> (core/routes api site)
         (buddy-accessrules/wrap-access-rules
           {:rules (get-rules admin-api user-api admin-site user-site

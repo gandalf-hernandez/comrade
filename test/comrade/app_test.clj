@@ -20,7 +20,8 @@
             [compojure.route :as route]
             [ring.util.response :as ring-response]
             [ring.mock.request :as mock]
-            [cheshire.core :as json]))
+            [cheshire.core :as json]
+            [slingshot.slingshot :as slingshot]))
 
 (defn- authenticate [username password]
   (cond
@@ -42,6 +43,28 @@
   (-> (ring-response/response
         (if tried-admin "Admin site access denied" "User site access denied"))
       (ring-response/status suggested-code)))
+
+(defn- wrap-api-exception-handler [handler]
+  (fn [request]
+    (slingshot/try+
+      (handler request)
+      (catch (map? %) {:keys [public]}
+        (-> (ring-response/response {:error (str "API: " public)})
+            (ring-response/status 500)))
+      (catch Exception e
+        (-> (ring-response/response {:error (str "API: " (.getMessage e))})
+            (ring-response/status 500))))))
+
+(defn- wrap-site-exception-handler [handler]
+  (fn [request]
+    (slingshot/try+
+      (handler request)
+      (catch (map? %) {:keys [public]}
+        (-> (ring-response/response (str "Site: " public))
+            (ring-response/status 500)))
+      (catch Exception e
+        (-> (ring-response/response (str "Site: " (.getMessage e)))
+            (ring-response/status 500))))))
 
 ;; REST routes
 (defroutes admin-api-routes
@@ -81,12 +104,14 @@
   (DELETE "/test/:id" [id :as {user-data :identity}]
        (ring-response/response {:username (:username user-data) :user-delete-id id}))
   (GET "/test" [] (ring-response/response {:response "user-test"}))
-  (route/not-found {:body {:error "Use2r API not found"}}))
+  (route/not-found {:body {:error "User API not found"}}))
 
 (defroutes api-routes
   (GET "/test" [] (ring-response/response {:response "open-test"}))
   (POST "/login" request (comrade-app/login request authenticate))
   (GET "/logout" [] comrade-app/logout)
+  (GET "/exception" [] (/ 1 0))
+  (GET "/exception+" [] (slingshot/throw+ {:public "throw+ exception"}))
   (context "/admin" [] admin-api-routes)
   (context "/user" [] user-api-routes)
   (route/not-found {:body {:error "Open API not found"}}))
@@ -106,6 +131,8 @@
 
 (defroutes site-routes
   (GET "/" [] "Open site root")
+  (GET "/exception" [] (/ 1 0))
+  (GET "/exception+" [] (slingshot/throw+ {:public "throw+ exception"}))
   (GET "/test/:id" [id :<< as-int :as {user-data :identity}]
        (ring-response/response (str "Open site " (get user-data :username "[none]") " id " id)))
   (context "/admin" request admin-site-routes)
@@ -129,20 +156,35 @@
             :api-access-denied-fn api-access-denied
             :site-access-denied-fn site-access-denied
             :restrictions restrictions
-            :session session)
+            :session session
+            :log-exceptions false
+            :wrap-api-exceptions false
+            :wrap-site-exceptions false
+            :api-custom-middleware wrap-api-exception-handler
+            :site-custom-middleware wrap-site-exception-handler)
      :errors {:admin-api-access-denied "Admin API access denied"
               :user-api-access-denied  "User API access denied"
               :admin-site-access-denied "Admin site access denied"
-              :user-site-access-denied "User site access denied"}}
+              :user-site-access-denied "User site access denied"}
+     :exceptions {:api-exception "API: Divide by zero"
+                  :site-exception "Site: Divide by zero"
+                  :api-slingshot-exception "API: throw+ exception"
+                  :site-slingshot-exception "Site: throw+ exception"}}
     {:app (comrade-app/define-app
             :api-routes api-routes
             :site-routes site-routes
             :restrictions restrictions
-            :session session)
+            :session session
+            :log-exceptions false)
+
      :errors {:admin-api-access-denied "Access denied"
               :user-api-access-denied  "Access denied"
               :admin-site-access-denied "Access denied"
-              :user-site-access-denied "Access denied"}}))
+              :user-site-access-denied "Access denied"}
+     :exceptions {:api-exception "Unknown error"
+                  :site-exception "Unknown error"
+                  :api-slingshot-exception "throw+ exception"
+                  :site-slingshot-exception "throw+ exception"}}))
 
 (defmacro defreq [method uri cookie response-status response-body & post-data]
   `(concat
@@ -151,7 +193,9 @@
 
 (defn- get-requests [user-admin-cookie admin-cookie user-cookie
                      {:keys [admin-api-access-denied user-api-access-denied
-                             admin-site-access-denied user-site-access-denied]}]
+                             admin-site-access-denied user-site-access-denied]}
+                     {:keys [api-exception site-exception
+                             api-slingshot-exception site-slingshot-exception]}]
   [(defreq :get "/" user-admin-cookie 200 "Open site root")
    (defreq :get "/" admin-cookie      200 "Open site root")
    (defreq :get "/" user-cookie       200  "Open site root")
@@ -251,7 +295,12 @@
    (defreq :put "/api/user/test/56" nil 401 {:error user-api-access-denied} {:foo "bar"})
    (defreq :delete "/api/user/test/78" nil 401 {:error user-api-access-denied})
    (defreq :head "/api/user/test/1" nil 401 nil)
-   (defreq :head "/api/user/test/2" nil 401 nil)])
+   (defreq :head "/api/user/test/2" nil 401 nil)
+
+   (defreq :get "/api/exception" nil 500 {:error api-exception})
+   (defreq :get "/exception" nil 500 site-exception)
+   (defreq :get "/api/exception+" nil 500 {:error api-slingshot-exception})
+   (defreq :get "/exception+" nil 500 site-slingshot-exception)])
 
 (defn post [app url data]
   (-> (mock/request :post url)
@@ -317,7 +366,7 @@
       (is (= (parse denied)   {:status 403, :body "Access denied"}))))
 
   (testing "login and route access"
-    (doall (for [{app :app errors :errors} apps]
+    (doall (for [{app :app errors :errors exceptions :exceptions} apps]
     (let
       [user-admin-response (post app "/api/login" {:username "user-admin-a" :password "pass-a"})
        admin-response (post app "/api/login" {:username "admin-b" :password "pass-b"})
@@ -335,7 +384,7 @@
 
       (doall
         (for [[line-number method uri cookie expected & data]
-              (get-requests user-admin-cookie admin-cookie user-cookie errors)]
+              (get-requests user-admin-cookie admin-cookie user-cookie errors exceptions)]
           (let
             [string-data (if-not (nil? data) (json/generate-string (first data)))
              response (-> (mock/request method uri)

@@ -9,7 +9,9 @@
                  [ring/ring-defaults "0.1.5"]
                  [ring/ring-json "0.4.0"]
                  [buddy/buddy-auth "0.9.0"]
-                 [cheshire "5.5.0"]]
+                 [cheshire "5.5.0"]
+                 [slingshot/slingshot "0.12.2"]
+                 [org.clojure/tools.logging "0.3.1"]]
   :plugins [[lein-ring "0.9.7"]]
   :profiles {:dev {:dependencies [[ring/ring-mock "0.3.0"]]}})
 

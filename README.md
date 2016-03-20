@@ -102,12 +102,31 @@ available parameters.
   :api-defaults ;; custom settings to pass to ring.middleware.defaults/wrap-defaults.
     ;; Defaults to ring.middleware.defaults/api-defaults (optional).
   :site-defaults ;; custom settings to pass to ring.middleware.defaults/wrap-defaults.
-    ;; Defaults to ring.middleware.defaults/site-defaults (optional)."
+    ;; Defaults to ring.middleware.defaults/site-defaults (optional).
+    :wrap-api-exceptions ;; if set exceptions are caught (API) (optional, default is true).
+    :wrap-site-exceptions ;; if set exceptions are caught (Site) (optional, default is true).
+    :log-exceptions ;; if set exceptions are logged (optional, default is true).
+    :api-custom-middlewares ;; custom middlewares to wrap around the request (API) (optional).
+    :site-custom-middlewares ;; custom middlewares to wrap around the request (Site) (optional).
 ```
 
 For examples of using all the parameters, look at
 [comrade-examples](https://github.com/gandalfhz/comrade-examples),
 as well as the [tests](https://github.com/gandalfhz/comrade/blob/master/test/comrade/app_test.clj).
+
+## Exception handling
+
+By default, comrade will catch all exceptions, log them and return a generic
+error as `{:error: "Unknown error"}` and `Unknown error` for the API and site
+routes respectively.
+
+Using [Slingshot](https://github.com/scgilardi/slingshot) exceptions it is possible
+to propagate up a custom error message to the client, by setting a :public key to
+the desired message, `(slingshot/throw+ {:public "I want the client to see this"})`.
+
+See the app [tests](https://github.com/gandalfhz/comrade/blob/master/test/comrade/app_test.clj)
+for how to implement your own exception handling by using custom API and site
+middlewares.
 
 ## Maturity
 
@@ -116,8 +135,8 @@ Since this project is new the APIs are subject to slight changes.
 ## Thanks
 
 Thanks to the makers of the excellent frameworks [Ring](https://github.com/ring-clojure),
-[Compojure](https://github.com/weavejester/compojure),
-and [Buddy](https://github.com/funcool/buddy-auth).
+[Compojure](https://github.com/weavejester/compojure), [Buddy](https://github.com/funcool/buddy-auth),
+and [Slingshot](https://github.com/scgilardi/slingshot).
 
 ## License
 
